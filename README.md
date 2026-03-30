@@ -31,6 +31,11 @@ local Config = {
         StickyTarget   = true,
         StickyFOVMulti = 2.5,
 
+        -- TOLERÂNCIA MULTI-TARGET (anti-tremor com múltiplos inimigos)
+        -- Quantos frames inválidos antes de soltar o alvo
+        -- 8 frames = ~0.13s @ 60fps (tempo pra ignorar oclusão momentânea)
+        InvalidFramesTolerance = 8,
+
         -- PREDIÇÃO (desligado = menos tremor)
         Prediction      = false,
         PredictionScale = 0.3,
@@ -67,6 +72,7 @@ local State = {
     LastTargetPos  = nil,
     IsLocked       = false,
     LastShotTime   = 0,
+    InvalidFrames  = 0,   -- Contador de frames que o alvo ficou inválido
 }
 
 local Connections = {}
@@ -114,9 +120,23 @@ end
 local function IsVisible(fromPos, toPos, targetChar)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Blacklist
+
+    -- ════════════════════════════════════════════════════════
+    -- CORREÇÃO MULTI-TARGET:
+    -- Antes: só filtrava o jogador local e o alvo
+    --   → Se um inimigo passasse na frente do alvo, o raycast
+    --     batia no corpo desse inimigo e devolvia "parede"
+    --     → alvo dropado → tremor ao trocar de target
+    --
+    -- Agora: filtra TODOS os personagens de inimigos
+    --   → Raycasts só colidem com geometria do mapa
+    --   → Inimigos na frente não causam falso-positivo de parede
+    -- ════════════════════════════════════════════════════════
     local filter = { LocalPlayer.Character }
-    if targetChar then
-        table.insert(filter, targetChar)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            table.insert(filter, p.Character)
+        end
     end
     params.FilterDescendantsInstances = filter
 
@@ -338,24 +358,44 @@ function Aimbot.Run()
         return
     end
 
-    -- Verificar alvo atual
+    -- ════════════════════════════════════════════════════════
+    -- VERIFICAR ALVO COM TOLERÂNCIA DE FRAMES
+    --
+    -- ANTES: Soltava o alvo imediatamente na primeira falha
+    --   → Com 2+ inimigos no FOV: 1 frame de oclusão = troca de alvo = tremor
+    --
+    -- AGORA: Conta frames inválidos. Só solta depois de N frames consecutivos
+    --   → Oclusões momentâneas (1-2 frames) são ignoradas
+    --   → Alvo não troca com flutuações de raycast
+    -- ════════════════════════════════════════════════════════
     if State.CurrentTarget then
         if not Aimbot.IsTargetValid(State.CurrentTarget) then
-            State.CurrentTarget = nil
-            State.IsLocked = false
-            State.LastTargetPos = nil
-            TargetDot.Visible = false
-            DeadZoneCircle.Visible = false
+            State.InvalidFrames = State.InvalidFrames + 1
+
+            if State.InvalidFrames >= Config.Aimbot.InvalidFramesTolerance then
+                -- Só solta o target depois de N frames consecutivos inválidos
+                State.CurrentTarget = nil
+                State.IsLocked = false
+                State.LastTargetPos = nil
+                State.InvalidFrames = 0
+                TargetDot.Visible = false
+                DeadZoneCircle.Visible = false
+            end
+            -- Enquanto dentro da tolerância: mantém o alvo e continua mirando
+        else
+            -- Alvo válido: reseta o contador
+            State.InvalidFrames = 0
         end
     end
 
-    -- Buscar novo alvo
+    -- Buscar novo alvo (só se não tiver nenhum)
     if not State.CurrentTarget then
         local newTarget = Aimbot.FindTarget()
         if newTarget then
             State.CurrentTarget = newTarget
             State.IsLocked = true
             State.LastTargetPos = nil
+            State.InvalidFrames = 0
         end
     end
 
